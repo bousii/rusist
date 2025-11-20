@@ -34,7 +34,7 @@ struct Combatant {
 
 struct Combat {
     combatants: Vec<Combatant>,
-    current_turn: i32,
+    current_turn: usize,
     round: i8,
 }
 
@@ -75,11 +75,27 @@ where P: AsRef<Path>, {
 }
 
 fn grab_initiative(filename: String) -> Result<Vec<Combatant>> {
-    println!("Grabbing initiative from file {}", filename);
-    let file_combatants: Vec<Combatant> = Vec::new();
+    //println!("Grabbing initiative from file {}", filename);
+    let mut file_combatants: Vec<Combatant> = Vec::new();
     if let Ok(lines) = read_lines(filename) {
         for line in lines.map_while(Result::ok) {
-            println!("{}", line);
+            let splices: Vec<&str> = line.split(", ").collect();
+            if splices.len() != 2 {
+                return Err(eyre!("Line format: <Name>, <Initiative Roll>"));
+            }
+            let fighter_name : String = splices[0].to_string();
+            let initiative_str = splices[1].to_string();
+
+            match initiative_str.parse::<i32>() {
+                Ok(initiative_roll) => {
+                    //println!("{} {}", fighter_name, initiative_roll);
+                    let combatant: Combatant = Combatant { name: fighter_name, initiative: initiative_roll };
+                    file_combatants.push(combatant);
+                }
+                Err(e) => {
+                    return Err(eyre!("{}", e));
+                }
+            }
         }
     }
     Ok(file_combatants)
@@ -200,8 +216,8 @@ fn render_remove_entry(frame: &mut Frame, state: &SetupState) {
     );
 
     frame.render_stateful_widget(
-        table, 
-        centered_area, 
+        table,
+        centered_area,
         &mut ratatui::widgets::TableState::default().with_selected(Some(state.selected))
     );
 }
@@ -246,7 +262,7 @@ fn add_entry(state: &mut SetupState) -> Result<bool> {
         let combatant: Combatant = Combatant { name: state.name_input.clone(), initiative: initiative };
         state.combatants.push(combatant);
     }
-    
+
     state.name_input.clear();
     state.initiative_input.clear();
     state.active_field = InputField::Name;
@@ -268,7 +284,7 @@ fn remove_entry(state: &mut SetupState) -> Result<bool> {
 }
 
 fn view_initiative_order(state: &mut SetupState) -> Result<bool> {
-    state.combatants.sort_by(|a, b| a.initiative.cmp(&b.initiative));
+    state.combatants.sort_by(|a, b| b.initiative.cmp(&a.initiative));
     state.menu = SetupMenuState::PopulateEntries;
     state.selected = 0;
     Ok(false)
@@ -287,9 +303,9 @@ fn populate_entries(terminal: &mut DefaultTerminal) -> Result<Vec<Combatant>> {
         }
 
         terminal.draw(|frame| render(frame, &state))?;
-        
+
         if let Event::Key(key) = event::read()? {
-          let exit: bool = handle_input(&mut state, key.code)?; 
+          let exit: bool = handle_input(&mut state, key.code)?;
           if exit {
               break Ok(state.combatants);
           }
@@ -376,7 +392,7 @@ fn handle_input(state: &mut SetupState, key: KeyCode) -> Result<bool> {
                     InputField::Initiative => { state.initiative_input.pop(); },
                     InputField::Name => { state.name_input.pop(); },
                 }
-            } 
+            }
             Ok(false)
         },
         KeyCode::Char(c) => {
@@ -398,23 +414,95 @@ fn handle_input(state: &mut SetupState, key: KeyCode) -> Result<bool> {
 }
 
 fn run(args: Args, mut terminal: DefaultTerminal) -> Result<()> {
-    let mut combatants: Vec<Combatant> = Vec::new();
-    match args.filename {
+    let mut combatants = match args.filename {
         Some(name) => match grab_initiative(name) {
-            Ok(fighters) => combatants = fighters,
+            Ok(fighters) => fighters,
             Err(e) => {
                 return Err(e)
             },
         },
         None => match populate_entries(&mut terminal) {
-            Ok(fighters) => combatants = fighters,
+            Ok(fighters) => fighters,
             Err(e) => return Err(e),
         }
+    };
+
+    if combatants.is_empty() {
+        return Err(eyre!("Initialization error: Unable to form a combatants list"));
     }
-    let combat: Combat = Combat { combatants: combatants, current_turn: 0, round: 0 };
-    println!("{}", combat.current_turn);
+
+    combatants.sort_by(|a, b| b.initiative.cmp(&a.initiative));
+
+    let mut combat: Combat = Combat { combatants: combatants, current_turn: 0, round: 0 };
+    loop {
+        terminal.draw(|frame| render_combat(frame, &combat))?;
+
+        if let Event::Key(key) = event::read()? {
+            let exit: bool = handle_combat_input(&mut combat, key.code)?;
+            if exit {
+                break;
+            }
+        }
+    }
 
     Ok(())
+}
+
+fn handle_combat_input(state: &mut Combat, key: KeyCode) -> Result<bool> {
+    match key {
+        KeyCode::Enter => {
+            state.current_turn = (state.current_turn + 1) % state.combatants.len();
+            if state.current_turn == 0 {
+                state.round += 1;
+            }
+            Ok(false)
+        },
+        KeyCode::Backspace => {
+            if state.current_turn == 0 {
+                state.round -= 1;
+                state.current_turn = state.combatants.len() - 1;
+            } else {
+                state.current_turn = state.current_turn - 1;
+            }
+            Ok(false)
+        },
+        KeyCode::Esc => {
+            return Ok(true);  // Exit app if on main
+        },
+        _ => {Ok(false)},
+    }
+
+}
+
+fn render_combat(frame: &mut Frame, state: &Combat) {
+    let area = frame.area();
+    let centered_area = centered_rect(60, 50, area);
+
+    let rows: Vec<Row> = state.combatants.iter().map(|c| {
+        Row::new(vec![c.name.clone(), c.initiative.to_string()])
+    }).collect();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Percentage(70),
+            Constraint::Percentage(30),
+        ],
+    )
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(format!("Initative! Round {} - Turn {}", state.round + 1, state.current_turn + 1))
+            .title_alignment(Alignment::Center)
+    )
+    .highlight_style(
+        Style::default()
+            .bg(Color::Blue)
+            .add_modifier(Modifier::BOLD)
+    );
+
+    frame.render_stateful_widget(table, centered_area, &mut ratatui::widgets::TableState::default().with_selected(Some(state.current_turn)));
+
 }
 
 fn main() -> Result<ExitCode> {
